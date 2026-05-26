@@ -16,6 +16,7 @@ pub enum EntryKind {
 }
 
 pub struct FileTree {
+    #[allow(dead_code)]
     pub root: PathBuf,
     pub entries: Vec<TreeEntry>,
     pub selected: usize,
