@@ -40,6 +40,7 @@ fn main() -> std::io::Result<()> {
         } else {
             path
         };
+        let path = path.canonicalize().unwrap_or(path);
         if path.is_dir() {
             path
         } else if path.is_file() {

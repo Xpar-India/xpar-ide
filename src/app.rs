@@ -346,6 +346,25 @@ impl App {
                 if let Some(bottom) = layout.bottom_panel {
                     if rect_contains(bottom, x, y) {
                         self.focus = FocusTarget::BottomPanel;
+                        let tab_row = bottom.y + 1;
+                        if y == tab_row {
+                            use crate::tui::bottom_panel::BottomTab;
+                            let titles = BottomTab::titles();
+                            let mut tx = bottom.x;
+                            for (i, title) in titles.iter().enumerate() {
+                                let w = title.len() as u16 + 2;
+                                if x >= tx && x < tx + w {
+                                    self.bottom_panel.active_tab = match i {
+                                        0 => BottomTab::Terminal,
+                                        1 => BottomTab::Build,
+                                        2 => BottomTab::ClaudeLog,
+                                        _ => BottomTab::Terminal,
+                                    };
+                                    break;
+                                }
+                                tx += w + 1;
+                            }
+                        }
                         return;
                     }
                 }
