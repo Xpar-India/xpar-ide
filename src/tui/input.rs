@@ -33,6 +33,10 @@ pub enum Action {
     PageUp,
     PageDown,
     SelectAll,
+    GrowSidebar,
+    ShrinkSidebar,
+    GrowBottomPanel,
+    ShrinkBottomPanel,
     Noop,
 }
 
@@ -54,6 +58,10 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('e') if ctrl => Action::FocusSidebar,
         KeyCode::Char('?') if ctrl => Action::ShowCheatsheet,
         KeyCode::Char('/') if ctrl && shift => Action::ShowCheatsheet,
+        KeyCode::Char('}') if ctrl => Action::GrowSidebar,
+        KeyCode::Char('{') if ctrl => Action::ShrinkSidebar,
+        KeyCode::Up if ctrl && shift => Action::ShrinkBottomPanel,
+        KeyCode::Down if ctrl && shift => Action::GrowBottomPanel,
         KeyCode::F(1) => Action::ShowCheatsheet,
         KeyCode::BackTab if ctrl => Action::NextTab,
         KeyCode::Tab if ctrl => Action::NextTab,

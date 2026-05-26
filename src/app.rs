@@ -30,6 +30,13 @@ pub enum FocusTarget {
     BottomPanel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragTarget {
+    None,
+    SidebarBorder,
+    BottomPanelBorder,
+}
+
 pub struct App {
     pub buffers: Vec<Buffer>,
     pub active_buffer: usize,
@@ -48,6 +55,7 @@ pub struct App {
     highlight_dirty: bool,
     pub tab_bar_state: TabBarState,
     pub terminal: Option<EmbeddedTerminal>,
+    drag: DragTarget,
     last_layout: Option<AppLayout>,
 }
 
@@ -78,6 +86,7 @@ impl App {
             highlight_dirty: true,
             tab_bar_state: TabBarState::new(),
             terminal: EmbeddedTerminal::new(80, 10).ok(),
+            drag: DragTarget::None,
             last_layout: None,
         }
     }
@@ -307,7 +316,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        let Some(layout) = &self.last_layout else {
+        let Some(layout) = self.last_layout.clone() else {
             return;
         };
 
@@ -320,6 +329,29 @@ impl App {
                     self.show_cheatsheet = false;
                     return;
                 }
+
+                // Check if clicking on sidebar right border (resize handle)
+                if let Some(sidebar) = layout.sidebar {
+                    let border_x = sidebar.x + sidebar.width;
+                    if x == border_x || x == border_x.saturating_sub(1) {
+                        if y > layout.menu_bar.y + layout.menu_bar.height
+                            && y < layout.statusbar.y
+                        {
+                            self.drag = DragTarget::SidebarBorder;
+                            return;
+                        }
+                    }
+                }
+
+                // Check if clicking on bottom panel top border (resize handle)
+                if let Some(bottom) = layout.bottom_panel {
+                    if y == bottom.y || y == bottom.y + 1 {
+                        self.drag = DragTarget::BottomPanelBorder;
+                        return;
+                    }
+                }
+
+                self.drag = DragTarget::None;
 
                 if rect_contains(layout.menu_bar, x, y) {
                     self.handle_menu_click(x);
@@ -368,6 +400,23 @@ impl App {
                         return;
                     }
                 }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                match self.drag {
+                    DragTarget::SidebarBorder => {
+                        let new_width = x.saturating_sub(layout.menu_bar.x);
+                        self.panel_state.sidebar_width = new_width.clamp(15, 60);
+                    }
+                    DragTarget::BottomPanelBorder => {
+                        let total_height = layout.statusbar.y;
+                        let new_height = total_height.saturating_sub(y);
+                        self.panel_state.bottom_panel_height = new_height.clamp(5, 30);
+                    }
+                    DragTarget::None => {}
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.drag = DragTarget::None;
             }
             MouseEventKind::ScrollUp => {
                 if let Some(sidebar) = layout.sidebar {
@@ -636,6 +685,18 @@ impl App {
             }
             Action::ToggleSidebar => self.panel_state.toggle_sidebar(),
             Action::ToggleBottomPanel => self.panel_state.toggle_bottom_panel(),
+            Action::GrowSidebar => {
+                self.panel_state.sidebar_width = (self.panel_state.sidebar_width + 3).min(60);
+            }
+            Action::ShrinkSidebar => {
+                self.panel_state.sidebar_width = self.panel_state.sidebar_width.saturating_sub(3).max(15);
+            }
+            Action::GrowBottomPanel => {
+                self.panel_state.bottom_panel_height = (self.panel_state.bottom_panel_height + 2).min(30);
+            }
+            Action::ShrinkBottomPanel => {
+                self.panel_state.bottom_panel_height = self.panel_state.bottom_panel_height.saturating_sub(2).max(5);
+            }
             Action::FocusSidebar => {
                 if self.panel_state.sidebar_visible && self.file_tree.is_some() {
                     self.focus = FocusTarget::Sidebar;
