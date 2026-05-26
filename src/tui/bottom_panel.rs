@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Widget};
+use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Widget, Wrap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
@@ -101,27 +101,29 @@ impl Widget for &BottomPanel {
                 let color = match self.active_tab {
                     BottomTab::Terminal => Color::Gray,
                     BottomTab::Build => Color::Gray,
-                    BottomTab::ClaudeLog => {
-                        if l.contains("Edit") || l.contains("Write") {
-                            Color::Green
-                        } else if l.contains("Bash") {
-                            Color::Yellow
-                        } else if l.contains("Read") {
-                            Color::Blue
-                        } else if l.contains("💭") {
-                            Color::Rgb(100, 100, 120)
-                        } else if l.starts_with("    ") {
-                            Color::Rgb(140, 140, 150)
-                        } else {
-                            Color::Gray
-                        }
-                    }
+                    BottomTab::ClaudeLog => colorize_claude_line(l),
                 };
                 Line::from(Span::styled(l.as_str(), Style::default().fg(color)))
             })
             .collect();
 
-        let content = Paragraph::new(display_lines);
+        let content = Paragraph::new(display_lines).wrap(Wrap { trim: false });
         content.render(content_area, buf);
+    }
+}
+
+fn colorize_claude_line(l: &str) -> Color {
+    if l.contains("Edit") || l.contains("Write") {
+        Color::Green
+    } else if l.contains("Bash") {
+        Color::Yellow
+    } else if l.contains("Read") {
+        Color::Blue
+    } else if l.contains("💭") {
+        Color::Rgb(100, 100, 120)
+    } else if l.starts_with("    ") {
+        Color::Rgb(160, 160, 170)
+    } else {
+        Color::Gray
     }
 }

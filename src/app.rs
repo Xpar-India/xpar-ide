@@ -56,6 +56,7 @@ pub struct App {
     pub tab_bar_state: TabBarState,
     pub terminal: Option<EmbeddedTerminal>,
     drag: DragTarget,
+    claude_log_scroll: usize,
     last_layout: Option<AppLayout>,
 }
 
@@ -87,6 +88,7 @@ impl App {
             tab_bar_state: TabBarState::new(),
             terminal: EmbeddedTerminal::new(80, 10).ok(),
             drag: DragTarget::None,
+            claude_log_scroll: 0,
             last_layout: None,
         }
     }
@@ -269,6 +271,7 @@ impl App {
         let entries = [
             ("Ctrl+S", "Save"),
             ("Ctrl+Q", "Quit"),
+            ("Ctrl+W", "Close tab"),
             ("Ctrl+Z / Ctrl+Y", "Undo / Redo"),
             ("Ctrl+B", "Toggle sidebar"),
             ("Ctrl+`", "Toggle bottom panel"),
@@ -276,23 +279,15 @@ impl App {
             ("Ctrl+L", "Focus Claude log"),
             ("Ctrl+E", "Focus sidebar"),
             ("Ctrl+Tab", "Next file tab"),
-            ("Ctrl+←/→", "Word jump"),
-            ("Tab", "Insert indent / cycle tabs"),
-            ("Ctrl+?/F1", "This cheatsheet"),
+            ("Ctrl+} / {", "Resize sidebar"),
+            ("Drag borders", "Resize any panel"),
             ("Mouse click", "Position cursor / select"),
-            ("Arrows", "Move cursor / navigate tree"),
-            ("Enter", "New line / open file"),
-            ("Home/End", "Line start/end"),
-            ("PgUp/PgDn", "Scroll page"),
-            ("Backspace/Del", "Delete"),
+            ("Ctrl+?/F1", "This cheatsheet"),
             ("Esc", "Return to editor"),
-            ("", ""),
-            ("Click Exit", "Quit (menu bar)"),
         ];
 
         let lines: Vec<Line> = entries
             .iter()
-            .filter(|(k, _)| !k.is_empty())
             .map(|(key, desc)| {
                 Line::from(vec![
                     Span::styled(
@@ -327,25 +322,25 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.show_cheatsheet {
                     self.show_cheatsheet = false;
+                    self.drag = DragTarget::None;
                     return;
                 }
 
-                // Check if clicking on sidebar right border (resize handle)
+                // Sidebar border drag — only on the exact border column, not the tab row
                 if let Some(sidebar) = layout.sidebar {
                     let border_x = sidebar.x + sidebar.width;
-                    if x == border_x || x == border_x.saturating_sub(1) {
-                        if y > layout.menu_bar.y + layout.menu_bar.height
-                            && y < layout.statusbar.y
-                        {
-                            self.drag = DragTarget::SidebarBorder;
-                            return;
-                        }
+                    if (x == border_x || x == border_x.saturating_sub(1))
+                        && y >= layout.tab_bar.y + layout.tab_bar.height
+                        && y < layout.statusbar.y
+                    {
+                        self.drag = DragTarget::SidebarBorder;
+                        return;
                     }
                 }
 
-                // Check if clicking on bottom panel top border (resize handle)
+                // Bottom panel border — only the very top border line, NOT the tab row
                 if let Some(bottom) = layout.bottom_panel {
-                    if y == bottom.y || y == bottom.y + 1 {
+                    if y == bottom.y && x >= bottom.x {
                         self.drag = DragTarget::BottomPanelBorder;
                         return;
                     }
@@ -377,26 +372,7 @@ impl App {
 
                 if let Some(bottom) = layout.bottom_panel {
                     if rect_contains(bottom, x, y) {
-                        self.focus = FocusTarget::BottomPanel;
-                        let tab_row = bottom.y + 1;
-                        if y == tab_row {
-                            use crate::tui::bottom_panel::BottomTab;
-                            let titles = BottomTab::titles();
-                            let mut tx = bottom.x;
-                            for (i, title) in titles.iter().enumerate() {
-                                let w = title.len() as u16 + 2;
-                                if x >= tx && x < tx + w {
-                                    self.bottom_panel.active_tab = match i {
-                                        0 => BottomTab::Terminal,
-                                        1 => BottomTab::Build,
-                                        2 => BottomTab::ClaudeLog,
-                                        _ => BottomTab::Terminal,
-                                    };
-                                    break;
-                                }
-                                tx += w + 1;
-                            }
-                        }
+                        self.handle_bottom_panel_click(x, y, bottom);
                         return;
                     }
                 }
@@ -405,23 +381,29 @@ impl App {
                 match self.drag {
                     DragTarget::SidebarBorder => {
                         let new_width = x.saturating_sub(layout.menu_bar.x);
-                        self.panel_state.sidebar_width = new_width.clamp(15, 60);
+                        self.panel_state.sidebar_width = new_width.clamp(10, 80);
                     }
                     DragTarget::BottomPanelBorder => {
                         let total_height = layout.statusbar.y;
                         let new_height = total_height.saturating_sub(y);
-                        self.panel_state.bottom_panel_height = new_height.clamp(5, 30);
+                        self.panel_state.bottom_panel_height = new_height.clamp(4, 40);
                     }
                     DragTarget::None => {}
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => {
+            MouseEventKind::Up(_) => {
                 self.drag = DragTarget::None;
             }
             MouseEventKind::ScrollUp => {
                 if let Some(sidebar) = layout.sidebar {
                     if rect_contains(sidebar, x, y) {
                         self.sidebar_scroll = self.sidebar_scroll.saturating_sub(3);
+                        return;
+                    }
+                }
+                if let Some(bottom) = layout.bottom_panel {
+                    if rect_contains(bottom, x, y) {
+                        self.claude_log_scroll = self.claude_log_scroll.saturating_sub(3);
                         return;
                     }
                 }
@@ -437,6 +419,12 @@ impl App {
                         return;
                     }
                 }
+                if let Some(bottom) = layout.bottom_panel {
+                    if rect_contains(bottom, x, y) {
+                        self.claude_log_scroll += 3;
+                        return;
+                    }
+                }
                 if rect_contains(layout.editor, x, y) {
                     let offset = &mut self.scroll_offsets[self.active_buffer];
                     let max = self.buffers[self.active_buffer]
@@ -449,19 +437,60 @@ impl App {
         }
     }
 
+    fn handle_bottom_panel_click(&mut self, x: u16, y: u16, bottom: Rect) {
+        self.focus = FocusTarget::BottomPanel;
+
+        // Tab row is the second row of the bottom panel (after the border)
+        let tab_row = bottom.y + 1;
+        if y == tab_row {
+            use crate::tui::bottom_panel::BottomTab;
+            let titles = BottomTab::titles();
+            let mut tx = bottom.x;
+            for (i, title) in titles.iter().enumerate() {
+                let w = title.len() as u16 + 2;
+                if x >= tx && x < tx + w {
+                    self.bottom_panel.active_tab = match i {
+                        0 => BottomTab::Terminal,
+                        1 => BottomTab::Build,
+                        2 => BottomTab::ClaudeLog,
+                        _ => BottomTab::Terminal,
+                    };
+                    break;
+                }
+                tx += w + 1;
+            }
+            return;
+        }
+
+        // Click on Claude Log content — toggle expand on the clicked entry
+        if self.bottom_panel.active_tab == crate::tui::bottom_panel::BottomTab::ClaudeLog {
+            let content_start_y = tab_row + 1;
+            if y >= content_start_y {
+                let clicked_line = (y - content_start_y) as usize + self.claude_log_scroll;
+                self.toggle_claude_entry_at_line(clicked_line);
+            }
+        }
+    }
+
+    fn toggle_claude_entry_at_line(&mut self, line_idx: usize) {
+        // Map visible line index back to entry index
+        let mut current_line = 0;
+        for entry in &mut self.claude_session.entries {
+            if current_line == line_idx {
+                entry.expanded = !entry.expanded;
+                return;
+            }
+            current_line += 1;
+            if entry.expanded {
+                current_line += entry.detail.lines().count();
+            }
+        }
+    }
+
     fn handle_menu_click(&mut self, x: u16) {
         if let Some(label) = self.menu_bar.hit_test(x) {
             match label.trim() {
                 "Exit" => self.running = false,
-                "File" => {
-                    // Future: file menu dropdown
-                }
-                "Edit" => {
-                    // Future: edit menu dropdown
-                }
-                "View" => {
-                    // Future: view menu dropdown
-                }
                 _ => {}
             }
         }
@@ -542,7 +571,7 @@ impl App {
     }
 
     fn handle_terminal_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyModifiers};
+        use crossterm::event::KeyModifiers;
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -628,6 +657,7 @@ impl App {
         for (i, buf) in self.buffers.iter().enumerate() {
             if buf.path() == Some(path) {
                 self.active_buffer = i;
+                self.highlight_dirty = true;
                 return;
             }
         }
@@ -640,6 +670,7 @@ impl App {
                 self.selections.push(sels);
                 self.scroll_offsets.push(0);
                 self.active_buffer = self.buffers.len() - 1;
+                self.highlight_dirty = true;
             }
             Err(e) => {
                 self.bottom_panel
@@ -675,27 +706,29 @@ impl App {
                 if let Some(pos) = self.buffer_mut().undo() {
                     self.selections_mut()
                         .set_primary(Selection::cursor(pos));
+                    self.highlight_dirty = true;
                 }
             }
             Action::Redo if self.focus == FocusTarget::Editor => {
                 if let Some(pos) = self.buffer_mut().redo() {
                     self.selections_mut()
                         .set_primary(Selection::cursor(pos));
+                    self.highlight_dirty = true;
                 }
             }
             Action::ToggleSidebar => self.panel_state.toggle_sidebar(),
             Action::ToggleBottomPanel => self.panel_state.toggle_bottom_panel(),
             Action::GrowSidebar => {
-                self.panel_state.sidebar_width = (self.panel_state.sidebar_width + 3).min(60);
+                self.panel_state.sidebar_width = (self.panel_state.sidebar_width + 3).min(80);
             }
             Action::ShrinkSidebar => {
-                self.panel_state.sidebar_width = self.panel_state.sidebar_width.saturating_sub(3).max(15);
+                self.panel_state.sidebar_width = self.panel_state.sidebar_width.saturating_sub(3).max(10);
             }
             Action::GrowBottomPanel => {
-                self.panel_state.bottom_panel_height = (self.panel_state.bottom_panel_height + 2).min(30);
+                self.panel_state.bottom_panel_height = (self.panel_state.bottom_panel_height + 2).min(40);
             }
             Action::ShrinkBottomPanel => {
-                self.panel_state.bottom_panel_height = self.panel_state.bottom_panel_height.saturating_sub(2).max(5);
+                self.panel_state.bottom_panel_height = self.panel_state.bottom_panel_height.saturating_sub(2).max(4);
             }
             Action::FocusSidebar => {
                 if self.panel_state.sidebar_visible && self.file_tree.is_some() {
