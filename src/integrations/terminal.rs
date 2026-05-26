@@ -46,7 +46,9 @@ impl EmbeddedTerminal {
                         break;
                     }
                     Ok(n) => {
-                        screen_clone.lock().unwrap().process(&buf[..n]);
+                        if let Ok(mut s) = screen_clone.try_lock() {
+                            s.process(&buf[..n]);
+                        }
                     }
                     Err(_) => {
                         *alive_clone.lock().unwrap() = false;
@@ -66,16 +68,19 @@ impl EmbeddedTerminal {
     }
 
     pub fn write_input(&mut self, data: &[u8]) {
-        let _ = self.writer.write_all(data);
+        // Non-blocking: ignore errors if PTY buffer is full
+        let _ = self.writer.write(data);
         let _ = self.writer.flush();
     }
 
     pub fn is_alive(&self) -> bool {
-        *self.alive.lock().unwrap()
+        self.alive.try_lock().map(|a| *a).unwrap_or(true)
     }
 
     pub fn screen_lines(&self) -> Vec<String> {
-        let screen = self.screen.lock().unwrap();
+        let Ok(screen) = self.screen.try_lock() else {
+            return vec!["(loading...)".to_string()];
+        };
         let s = screen.screen();
         let mut lines: Vec<String> = s.rows(0, self.cols).collect();
 
@@ -87,7 +92,9 @@ impl EmbeddedTerminal {
     }
 
     pub fn cursor_position(&self) -> (u16, u16) {
-        let screen = self.screen.lock().unwrap();
+        let Ok(screen) = self.screen.try_lock() else {
+            return (0, 0);
+        };
         let s = screen.screen();
         s.cursor_position()
     }
@@ -95,6 +102,8 @@ impl EmbeddedTerminal {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
-        self.screen.lock().unwrap().set_size(rows, cols);
+        if let Ok(mut s) = self.screen.try_lock() {
+            s.set_size(rows, cols);
+        }
     }
 }

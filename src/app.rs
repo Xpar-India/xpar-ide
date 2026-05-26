@@ -114,8 +114,12 @@ impl App {
     }
 
     pub fn run(mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
+        let mut claude_poll_counter: u8 = 0;
         while self.running {
-            let _ = self.claude_session.poll();
+            claude_poll_counter = claude_poll_counter.wrapping_add(1);
+            if claude_poll_counter % 5 == 0 {
+                let _ = self.claude_session.poll();
+            }
             self.sync_claude_to_ui();
 
             terminal.draw(|frame| self.draw(frame))?;
@@ -123,7 +127,12 @@ impl App {
             if event::poll(std::time::Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) => {
-                        if self.focus == FocusTarget::BottomPanel
+                        // Esc is universal reset — always works
+                        if key.code == KeyCode::Esc {
+                            self.drag = DragTarget::None;
+                            self.show_cheatsheet = false;
+                            self.focus = FocusTarget::Editor;
+                        } else if self.focus == FocusTarget::BottomPanel
                             && self.bottom_panel.active_tab == crate::tui::bottom_panel::BottomTab::Terminal
                         {
                             self.handle_terminal_key(key);
@@ -320,16 +329,18 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Always clear drag on fresh click
+                self.drag = DragTarget::None;
+
                 if self.show_cheatsheet {
                     self.show_cheatsheet = false;
-                    self.drag = DragTarget::None;
                     return;
                 }
 
-                // Sidebar border drag — only on the exact border column, not the tab row
+                // Sidebar border drag — 2px hit zone on the border
                 if let Some(sidebar) = layout.sidebar {
                     let border_x = sidebar.x + sidebar.width;
-                    if (x == border_x || x == border_x.saturating_sub(1))
+                    if x >= border_x.saturating_sub(1) && x <= border_x
                         && y >= layout.tab_bar.y + layout.tab_bar.height
                         && y < layout.statusbar.y
                     {
@@ -338,15 +349,13 @@ impl App {
                     }
                 }
 
-                // Bottom panel border — only the very top border line, NOT the tab row
+                // Bottom panel border — only the exact top border line
                 if let Some(bottom) = layout.bottom_panel {
                     if y == bottom.y && x >= bottom.x {
                         self.drag = DragTarget::BottomPanelBorder;
                         return;
                     }
                 }
-
-                self.drag = DragTarget::None;
 
                 if rect_contains(layout.menu_bar, x, y) {
                     self.handle_menu_click(x);
