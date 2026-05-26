@@ -46,16 +46,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(project_dir: Option<PathBuf>, watch_path: Option<PathBuf>) -> Self {
+    pub fn new(project_dir: Option<PathBuf>, claude_session: Option<ClaudeSession>) -> Self {
         let file_tree = project_dir.as_ref().map(|dir| FileTree::new(dir.clone()));
 
         let buf = Buffer::from_str("// Welcome to xpar.IDE\n// Open a file or select one from the sidebar.\n");
         let sels = Selections::new(Position::zero());
 
-        let mut claude_session = ClaudeSession::new();
-        if let Some(path) = watch_path {
-            claude_session.watch(path);
-        }
+        let claude_session = claude_session.unwrap_or_else(ClaudeSession::new);
 
         Self {
             buffers: vec![buf],

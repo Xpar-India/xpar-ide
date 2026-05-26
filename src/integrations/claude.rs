@@ -67,6 +67,41 @@ impl ClaudeSession {
         self.stream_path = Some(path);
     }
 
+    pub fn auto_detect(project_dir: &Path) -> Option<Self> {
+        let home = dirs_next::home_dir()?;
+        let claude_projects = home.join(".claude").join("projects");
+
+        let dir_str = project_dir.to_string_lossy();
+        let encoded = dir_str.replace('/', "-");
+
+        let project_session_dir = claude_projects.join(&encoded);
+        if !project_session_dir.is_dir() {
+            return None;
+        }
+
+        let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
+        if let Ok(entries) = fs::read_dir(&project_session_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "jsonl") {
+                    if let Ok(meta) = path.metadata() {
+                        if let Ok(modified) = meta.modified() {
+                            if newest.as_ref().map_or(true, |(_, t)| modified > *t) {
+                                newest = Some((path, modified));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let (session_path, _) = newest?;
+        let mut session = Self::new();
+        session.watch(session_path);
+        let _ = session.poll();
+        Some(session)
+    }
+
     pub fn poll(&mut self) -> io::Result<bool> {
         let Some(path) = &self.stream_path else {
             return Ok(false);

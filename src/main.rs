@@ -7,6 +7,7 @@ mod tui;
 use std::path::PathBuf;
 
 use app::App;
+use integrations::claude::ClaudeSession;
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -48,7 +49,19 @@ fn main() -> std::io::Result<()> {
         }
     });
 
-    let mut app = App::new(project_dir, watch_path);
+    let claude_session = if let Some(wp) = watch_path {
+        let mut session = ClaudeSession::new();
+        session.watch(wp);
+        Some(session)
+    } else if let Some(dir) = &project_dir {
+        ClaudeSession::auto_detect(dir)
+    } else if let Ok(cwd) = std::env::current_dir() {
+        ClaudeSession::auto_detect(&cwd)
+    } else {
+        None
+    };
+
+    let mut app = App::new(project_dir, claude_session);
 
     if let Some(s) = &project_path {
         let path = PathBuf::from(s);
