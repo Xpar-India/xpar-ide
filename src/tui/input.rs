@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum Action {
     Quit,
     Save,
+    CloseTab,
     Undo,
     Redo,
     ToggleSidebar,
@@ -41,6 +42,7 @@ pub fn map_key(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('q') if ctrl => Action::Quit,
         KeyCode::Char('s') if ctrl => Action::Save,
+        KeyCode::Char('w') if ctrl => Action::CloseTab,
         KeyCode::Char('z') if ctrl => Action::Undo,
         KeyCode::Char('y') if ctrl => Action::Redo,
         KeyCode::Char('a') if ctrl => Action::SelectAll,

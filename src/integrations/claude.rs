@@ -369,6 +369,18 @@ impl ClaudeSession {
         }
     }
 
+    pub fn status_text(&self) -> String {
+        if self.stream_path.is_none() {
+            return "No Claude session".to_string();
+        }
+        let count = self.entries.iter().filter(|e| matches!(e.kind, CommandKind::Edit | CommandKind::Write | CommandKind::Bash)).count();
+        if count == 0 {
+            "Claude: connected (0 actions)".to_string()
+        } else {
+            format!("Claude: {} actions", count)
+        }
+    }
+
     pub fn sidebar_entries(&self) -> Vec<String> {
         if self.entries.is_empty() {
             return vec!["(no session)".to_string()];

@@ -6,12 +6,14 @@ use ratatui::widgets::Widget;
 use crate::core::buffer::Buffer;
 use crate::core::selections::Selections;
 use crate::integrations::claude::DiffMarker;
+use crate::integrations::treesitter::Highlighter;
 
 pub struct EditorView<'a> {
     buffer: &'a Buffer,
     selections: &'a Selections,
     scroll_offset: usize,
     diff_markers: Option<&'a dyn Fn(usize) -> Option<DiffMarker>>,
+    highlighter: Option<&'a Highlighter>,
 }
 
 impl<'a> EditorView<'a> {
@@ -21,11 +23,17 @@ impl<'a> EditorView<'a> {
             selections,
             scroll_offset,
             diff_markers: None,
+            highlighter: None,
         }
     }
 
     pub fn with_diff_markers(mut self, f: &'a dyn Fn(usize) -> Option<DiffMarker>) -> Self {
         self.diff_markers = Some(f);
+        self
+    }
+
+    pub fn with_highlighter(mut self, h: &'a Highlighter) -> Self {
+        self.highlighter = Some(h);
         self
     }
 }
@@ -80,10 +88,16 @@ impl Widget for EditorView<'_> {
                     for (i, ch) in line_str.chars().enumerate() {
                         let x = area.x + GUTTER_WIDTH + i as u16;
                         if x < area.x + area.width {
+                            let fg = self
+                                .highlighter
+                                .and_then(|h| h.get_highlight_at(line_idx, i))
+                                .map(|k| k.to_color())
+                                .unwrap_or(Color::Rgb(171, 178, 191));
+
                             let style = if let Some(bg) = line_bg {
-                                Style::default().bg(bg)
+                                Style::default().fg(fg).bg(bg)
                             } else {
-                                Style::default()
+                                Style::default().fg(fg)
                             };
                             buf[(x, y)].set_char(ch).set_style(style);
                         }

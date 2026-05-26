@@ -10,6 +10,8 @@ use crate::core::selections::{Position, Selection, Selections};
 use crate::fs::loader;
 use crate::fs::tree::{EntryKind, FileTree};
 use crate::integrations::claude::ClaudeSession;
+use crate::integrations::terminal::EmbeddedTerminal;
+use crate::integrations::treesitter::Highlighter;
 use crate::tui::bottom_panel::BottomPanel;
 use crate::tui::editor_view::EditorView;
 use crate::tui::input::{map_key, Action};
@@ -17,7 +19,7 @@ use crate::tui::layout::{compute_layout, AppLayout, PanelState};
 use crate::tui::menu_bar::MenuBar;
 use crate::tui::sidebar::SidebarView;
 use crate::tui::statusbar::StatusBar;
-use crate::tui::tab_bar::{TabBar, TabEntry};
+use crate::tui::tab_bar::{TabBar, TabBarState, TabBarWidget, TabEntry, TabHitResult};
 
 const GUTTER_WIDTH: u16 = 6;
 
@@ -42,6 +44,10 @@ pub struct App {
     pub show_cheatsheet: bool,
     pub running: bool,
     pub sidebar_scroll: usize,
+    pub highlighter: Highlighter,
+    highlight_dirty: bool,
+    pub tab_bar_state: TabBarState,
+    pub terminal: Option<EmbeddedTerminal>,
     last_layout: Option<AppLayout>,
 }
 
@@ -68,6 +74,10 @@ impl App {
             show_cheatsheet: false,
             running: true,
             sidebar_scroll: 0,
+            highlighter: Highlighter::new(),
+            highlight_dirty: true,
+            tab_bar_state: TabBarState::new(),
+            terminal: EmbeddedTerminal::new(80, 10).ok(),
             last_layout: None,
         }
     }
@@ -102,7 +112,11 @@ impl App {
             if event::poll(std::time::Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) => {
-                        if self.focus == FocusTarget::Sidebar {
+                        if self.focus == FocusTarget::BottomPanel
+                            && self.bottom_panel.active_tab == crate::tui::bottom_panel::BottomTab::Terminal
+                        {
+                            self.handle_terminal_key(key);
+                        } else if self.focus == FocusTarget::Sidebar {
                             self.handle_sidebar_key(key.code);
                         } else {
                             let action = map_key(key);
@@ -121,9 +135,28 @@ impl App {
 
     fn sync_claude_to_ui(&mut self) {
         self.bottom_panel.claude_log_lines = self.claude_session.log_lines();
+        if let Some(term) = &self.terminal {
+            self.bottom_panel.terminal_lines = term.screen_lines();
+            if !term.is_alive() {
+                self.bottom_panel.terminal_lines.push("Shell exited. Press Enter to restart.".to_string());
+            }
+        }
+    }
+
+    fn refresh_highlights(&mut self) {
+        if self.highlight_dirty {
+            if let Some(path) = self.buffer().path().cloned() {
+                self.highlighter.set_language_for_file(&path);
+            }
+            let source = self.buffer().contents();
+            self.highlighter.parse(&source);
+            self.highlight_dirty = false;
+        }
     }
 
     fn draw(&mut self, frame: &mut ratatui::Frame) {
+        self.refresh_highlights();
+
         let area = frame.area();
         let layout = compute_layout(area, &self.panel_state);
 
@@ -154,7 +187,7 @@ impl App {
             tabs: &tabs,
             active: self.active_buffer,
         };
-        frame.render_widget(tab_bar, layout.tab_bar);
+        frame.render_widget(TabBarWidget { bar: &tab_bar, state: &mut self.tab_bar_state }, layout.tab_bar);
 
         if let Some(sidebar_area) = layout.sidebar {
             let claude_entries = self.claude_session.sidebar_entries();
@@ -177,7 +210,8 @@ impl App {
             self.selections(),
             self.scroll_offset(),
         )
-        .with_diff_markers(&diff_fn);
+        .with_diff_markers(&diff_fn)
+        .with_highlighter(&self.highlighter);
         frame.render_widget(editor_view, layout.editor);
 
         if let Some(bottom_area) = layout.bottom_panel {
@@ -192,12 +226,14 @@ impl App {
             .unwrap_or_else(|| "[scratch]".to_string());
 
         let primary = self.selections().primary();
+        let claude_status = self.claude_session.status_text();
         let statusbar = StatusBar {
             filename: &filename,
             line: primary.head.line,
             col: primary.head.col,
             dirty: self.buffer().is_dirty(),
             total_lines: self.buffer().line_count(),
+            claude_status: &claude_status,
         };
         frame.render_widget(statusbar, layout.statusbar);
 
@@ -291,7 +327,7 @@ impl App {
                 }
 
                 if rect_contains(layout.tab_bar, x, y) {
-                    self.handle_tab_click(x, layout.tab_bar);
+                    self.handle_tab_click(x);
                     return;
                 }
 
@@ -363,22 +399,37 @@ impl App {
         }
     }
 
-    fn handle_tab_click(&mut self, x: u16, tab_area: Rect) {
-        let mut x_offset = tab_area.x;
-        for (i, buf) in self.buffers.iter().enumerate() {
-            let name = buf
-                .path()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "[scratch]".to_string());
-            let tab_width = name.len() as u16 + 4; // " name " + separator
-            if x >= x_offset && x < x_offset + tab_width {
-                self.active_buffer = i;
-                self.focus = FocusTarget::Editor;
-                return;
+    fn handle_tab_click(&mut self, x: u16) {
+        if let Some(result) = self.tab_bar_state.hit_test(x) {
+            match result {
+                TabHitResult::Select(i) => {
+                    if i < self.buffers.len() {
+                        self.active_buffer = i;
+                        self.focus = FocusTarget::Editor;
+                        self.highlight_dirty = true;
+                    }
+                }
+                TabHitResult::Close(i) => {
+                    self.close_tab(i);
+                }
             }
-            x_offset += tab_width + 1;
         }
+    }
+
+    fn close_tab(&mut self, idx: usize) {
+        if self.buffers.len() <= 1 {
+            return;
+        }
+        self.buffers.remove(idx);
+        self.selections.remove(idx);
+        self.scroll_offsets.remove(idx);
+
+        if self.active_buffer >= self.buffers.len() {
+            self.active_buffer = self.buffers.len() - 1;
+        } else if self.active_buffer > idx {
+            self.active_buffer -= 1;
+        }
+        self.highlight_dirty = true;
     }
 
     fn handle_sidebar_click(&mut self, _x: u16, y: u16, sidebar_area: Rect) {
@@ -420,6 +471,54 @@ impl App {
 
         self.selections_mut()
             .set_primary(Selection::cursor(Position::new(line, col)));
+    }
+
+    fn handle_terminal_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyModifiers};
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if key.code == KeyCode::Esc {
+            self.focus = FocusTarget::Editor;
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char('q') {
+            self.running = false;
+            return;
+        }
+
+        let Some(term) = &mut self.terminal else { return };
+
+        if !term.is_alive() {
+            if key.code == KeyCode::Enter {
+                self.terminal = EmbeddedTerminal::new(80, 10).ok();
+            }
+            return;
+        }
+
+        let bytes: Vec<u8> = match key.code {
+            KeyCode::Char(c) if ctrl => vec![(c as u8) & 0x1f],
+            KeyCode::Char(c) => {
+                let mut buf = [0u8; 4];
+                c.encode_utf8(&mut buf);
+                buf[..c.len_utf8()].to_vec()
+            }
+            KeyCode::Enter => vec![b'\r'],
+            KeyCode::Backspace => vec![0x7f],
+            KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
+            KeyCode::Tab => vec![b'\t'],
+            KeyCode::Up => vec![0x1b, b'[', b'A'],
+            KeyCode::Down => vec![0x1b, b'[', b'B'],
+            KeyCode::Right => vec![0x1b, b'[', b'C'],
+            KeyCode::Left => vec![0x1b, b'[', b'D'],
+            KeyCode::Home => vec![0x1b, b'[', b'H'],
+            KeyCode::End => vec![0x1b, b'[', b'F'],
+            _ => vec![],
+        };
+
+        if !bytes.is_empty() {
+            term.write_input(&bytes);
+        }
     }
 
     fn handle_sidebar_key(&mut self, code: KeyCode) {
@@ -503,6 +602,7 @@ impl App {
         match action {
             Action::Quit => self.running = false,
             Action::Save => self.save_current_buffer(),
+            Action::CloseTab => self.close_tab(self.active_buffer),
             Action::Undo if self.focus == FocusTarget::Editor => {
                 if let Some(pos) = self.buffer_mut().undo() {
                     self.selections_mut()
@@ -535,6 +635,7 @@ impl App {
             Action::NextTab => {
                 if self.buffers.len() > 1 {
                     self.active_buffer = (self.active_buffer + 1) % self.buffers.len();
+                    self.highlight_dirty = true;
                 }
             }
             Action::CycleBottomTab => {
@@ -554,12 +655,14 @@ impl App {
                 let new_col = pos.col + 1;
                 self.selections_mut()
                     .set_primary(Selection::cursor(Position::new(pos.line, new_col)));
+                self.highlight_dirty = true;
             }
             Action::InsertTab if self.focus == FocusTarget::Editor => {
                 let pos = self.selections().primary().head;
                 self.buffer_mut().insert(pos, "    ");
                 self.selections_mut()
                     .set_primary(Selection::cursor(Position::new(pos.line, pos.col + 4)));
+                self.highlight_dirty = true;
             }
             Action::Backspace if self.focus == FocusTarget::Editor => {
                 let pos = self.selections().primary().head;
@@ -567,16 +670,19 @@ impl App {
                     self.selections_mut()
                         .set_primary(Selection::cursor(new_pos));
                 }
+                self.highlight_dirty = true;
             }
             Action::Delete if self.focus == FocusTarget::Editor => {
                 let pos = self.selections().primary().head;
                 self.buffer_mut().delete_char_at(pos);
+                self.highlight_dirty = true;
             }
             Action::Enter if self.focus == FocusTarget::Editor => {
                 let pos = self.selections().primary().head;
                 self.buffer_mut().insert(pos, "\n");
                 self.selections_mut()
                     .set_primary(Selection::cursor(Position::new(pos.line + 1, 0)));
+                self.highlight_dirty = true;
             }
             Action::CursorUp => self.move_cursor_vertical(-1),
             Action::CursorDown => self.move_cursor_vertical(1),

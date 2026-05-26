@@ -9,6 +9,7 @@ pub struct StatusBar<'a> {
     pub col: usize,
     pub dirty: bool,
     pub total_lines: usize,
+    pub claude_status: &'a str,
 }
 
 impl Widget for StatusBar<'_> {
@@ -24,7 +25,13 @@ impl Widget for StatusBar<'_> {
 
         let dirty_marker = if self.dirty { " [+]" } else { "" };
         let left = format!(" {}{}", self.filename, dirty_marker);
-        let right = format!("{}:{} / {} lines  ", self.line + 1, self.col + 1, self.total_lines);
+        let right = format!(
+            "{} | {}:{} / {} lines  ",
+            self.claude_status,
+            self.line + 1,
+            self.col + 1,
+            self.total_lines
+        );
 
         for (i, ch) in left.chars().enumerate() {
             let x = area.x + i as u16;
@@ -33,11 +40,16 @@ impl Widget for StatusBar<'_> {
             }
         }
 
-        let right_start = area.x + area.width - right.len() as u16;
+        let right_start = area.x + area.width.saturating_sub(right.len() as u16);
         for (i, ch) in right.chars().enumerate() {
             let x = right_start + i as u16;
             if x < area.x + area.width && x >= area.x {
-                buf[(x, area.y)].set_char(ch).set_style(bg);
+                let style = if self.claude_status.contains("Claude") {
+                    Style::default().bg(Color::DarkGray).fg(Color::Green)
+                } else {
+                    bg
+                };
+                buf[(x, area.y)].set_char(ch).set_style(style);
             }
         }
     }
