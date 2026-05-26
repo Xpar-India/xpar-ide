@@ -82,14 +82,18 @@ impl SidebarView<'_> {
             .claude_entries
             .iter()
             .map(|entry| {
-                let style = if entry.starts_with("▸ Edit") {
+                let style = if entry.contains("Edit") {
                     Style::default().fg(Color::Green)
-                } else if entry.starts_with("▸ Bash") {
+                } else if entry.contains("Write") {
+                    Style::default().fg(Color::Green)
+                } else if entry.contains("Bash") {
                     Style::default().fg(Color::Yellow)
-                } else if entry.starts_with("▸ Read") {
+                } else if entry.contains("Read") {
                     Style::default().fg(Color::Blue)
+                } else if entry.contains("💭") {
+                    Style::default().fg(Color::Rgb(100, 100, 120))
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::Gray)
                 };
                 Line::from(Span::styled(entry.as_str(), style))
             })

@@ -102,14 +102,18 @@ impl Widget for &BottomPanel {
                     BottomTab::Terminal => Color::Gray,
                     BottomTab::Build => Color::Gray,
                     BottomTab::ClaudeLog => {
-                        if l.starts_with("▸ Edit") {
+                        if l.contains("Edit") || l.contains("Write") {
                             Color::Green
-                        } else if l.starts_with("▸ Bash") {
+                        } else if l.contains("Bash") {
                             Color::Yellow
-                        } else if l.starts_with("▸ Read") {
+                        } else if l.contains("Read") {
                             Color::Blue
+                        } else if l.contains("💭") {
+                            Color::Rgb(100, 100, 120)
+                        } else if l.starts_with("    ") {
+                            Color::Rgb(140, 140, 150)
                         } else {
-                            Color::DarkGray
+                            Color::Gray
                         }
                     }
                 };
