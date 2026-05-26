@@ -447,8 +447,9 @@ pub enum DiffMarker {
 
 fn truncate(s: &str, max: usize) -> String {
     let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() > max {
-        format!("{}...", &first_line[..max])
+    if first_line.chars().count() > max {
+        let truncated: String = first_line.chars().take(max).collect();
+        format!("{}...", truncated)
     } else {
         first_line.to_string()
     }
@@ -602,5 +603,187 @@ mod tests {
         let sidebar = session.sidebar_entries();
         assert!(sidebar[0].contains("third"));
         assert!(sidebar[2].contains("first"));
+    }
+
+    #[test]
+    fn auto_detect_finds_test_session() {
+        let home = dirs_next::home_dir().unwrap();
+        let session_dir = home
+            .join(".claude")
+            .join("projects")
+            .join("-tmp-xpar-test-project");
+
+        if !session_dir.is_dir() {
+            // Skip if test session wasn't set up
+            return;
+        }
+
+        let session = ClaudeSession::auto_detect(Path::new("/tmp/xpar-test-project"));
+        assert!(session.is_some(), "auto_detect should find the test session");
+
+        let session = session.unwrap();
+        assert!(
+            session.entries.len() >= 4,
+            "should parse at least 4 entries (Read, Edit, 2x Bash, Write), got {}",
+            session.entries.len()
+        );
+
+        // Verify specific events were parsed
+        let has_read = session.entries.iter().any(|e| e.kind == CommandKind::Read);
+        let has_edit = session.entries.iter().any(|e| e.kind == CommandKind::Edit);
+        let has_bash = session.entries.iter().any(|e| e.kind == CommandKind::Bash);
+        let has_write = session.entries.iter().any(|e| e.kind == CommandKind::Write);
+
+        assert!(has_read, "should have a Read event");
+        assert!(has_edit, "should have an Edit event");
+        assert!(has_bash, "should have a Bash event");
+        assert!(has_write, "should have a Write event");
+
+        // Verify Edit tracked the modified file
+        assert!(
+            session.is_file_claude_modified(Path::new("/tmp/xpar-test-project/src/main.rs")),
+            "main.rs should be marked as claude-modified"
+        );
+
+        // Verify Write created a new file
+        assert!(
+            session.is_file_claude_created(Path::new("/tmp/xpar-test-project/src/lib.rs")),
+            "lib.rs should be marked as claude-created"
+        );
+
+        // Verify diff markers exist for the edited file
+        let marker = session.get_line_diff_marker(
+            Path::new("/tmp/xpar-test-project/src/main.rs"),
+            0,
+        );
+        // The diff should have some added lines from the edit
+        let has_any_diff = session
+            .file_diffs
+            .get(Path::new("/tmp/xpar-test-project/src/main.rs"))
+            .map(|d| !d.hunks.is_empty())
+            .unwrap_or(false);
+        assert!(has_any_diff, "should have diff hunks for main.rs");
+
+        // Verify status text
+        let status = session.status_text();
+        assert!(
+            status.contains("Claude:"),
+            "status should show Claude connection: {}",
+            status
+        );
+        assert!(
+            status.contains("actions"),
+            "status should show action count: {}",
+            status
+        );
+
+        // Verify sidebar entries
+        let sidebar = session.sidebar_entries();
+        assert!(sidebar.len() > 1, "sidebar should have entries");
+        assert!(
+            !sidebar[0].contains("(no session)"),
+            "sidebar should not show 'no session'"
+        );
+
+        // Verify log lines
+        let log = session.log_lines();
+        assert!(log.len() > 1, "log should have entries");
+        assert!(
+            log.iter().any(|l| l.contains("Edit")),
+            "log should contain Edit entry"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("Bash")),
+            "log should contain Bash entry"
+        );
+    }
+
+    #[test]
+    fn auto_detect_with_current_project() {
+        // Test auto-detect against the REAL current project session
+        let cwd = std::env::current_dir().unwrap();
+        let session = ClaudeSession::auto_detect(&cwd);
+
+        // This test runs in the xpar-ide project dir, which should have sessions
+        if let Some(session) = session {
+            assert!(
+                !session.entries.is_empty(),
+                "current project session should have entries"
+            );
+            let status = session.status_text();
+            assert!(
+                status.contains("Claude:"),
+                "status should show connection: {}",
+                status
+            );
+
+            // Should have Edit/Write/Bash from building this project
+            let edit_count = session
+                .entries
+                .iter()
+                .filter(|e| e.kind == CommandKind::Edit)
+                .count();
+            let write_count = session
+                .entries
+                .iter()
+                .filter(|e| e.kind == CommandKind::Write)
+                .count();
+            let bash_count = session
+                .entries
+                .iter()
+                .filter(|e| e.kind == CommandKind::Bash)
+                .count();
+
+            println!(
+                "Current project session: {} edits, {} writes, {} bash commands",
+                edit_count, write_count, bash_count
+            );
+            assert!(
+                edit_count + write_count + bash_count > 0,
+                "should have some tool use events"
+            );
+        }
+    }
+
+    #[test]
+    fn full_pipeline_poll_incremental() {
+        let dir = std::env::temp_dir().join("xpar_claude_incremental");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream_file = dir.join("session.jsonl");
+
+        // Write first batch
+        std::fs::write(&stream_file, format!("{}\n", make_bash_event("cargo build"))).unwrap();
+
+        let mut session = ClaudeSession::new();
+        session.watch(stream_file.clone());
+        session.poll().unwrap();
+        assert_eq!(session.entries.len(), 1, "first poll: 1 entry");
+
+        // Append more events (simulates Claude working)
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stream_file)
+            .unwrap();
+        writeln!(f, "{}", make_edit_event("/tmp/foo.rs", "old", "new")).unwrap();
+        writeln!(f, "{}", make_write_event("/tmp/bar.rs", "content")).unwrap();
+
+        session.poll().unwrap();
+        assert_eq!(session.entries.len(), 3, "second poll: 3 entries total");
+        assert_eq!(session.entries[1].kind, CommandKind::Edit);
+        assert_eq!(session.entries[2].kind, CommandKind::Write);
+
+        // Verify UI outputs
+        let sidebar = session.sidebar_entries();
+        assert_eq!(sidebar.len(), 3);
+
+        let log = session.log_lines();
+        assert!(log.len() >= 3);
+
+        let status = session.status_text();
+        assert!(status.contains("3 actions"), "status: {}", status);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
